@@ -1,0 +1,24 @@
+pip a:=mschd.plm[g8]
+seteof mschd.plm
+isx
+plm80 mschd.plm nolist debug
+era mschd.plm
+link mschd.obj,x0100,plm80.lib to mschd1.mod
+locate mschd1.mod code(0100H) stacksize(100)
+era mschd1.mod
+objhex mschd1 to mschd1.hex
+link mschd.obj,x0200,plm80.lib to mschd2.mod
+locate mschd2.mod code(0200H) stacksize(100)
+era mschd2.mod
+objhex mschd2 to mschd2.hex
+era mschd2
+cpm
+objcpm mschd1
+era mschd1.com
+pip mschd.hex=mschd1.hex,mschd2.hex
+era mschd1.hex
+era mschd2.hex
+zero
+genmod mschd.hex xmschd.prl 
+era *.hex
+

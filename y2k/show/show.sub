@@ -1,0 +1,24 @@
+pip a:=show.plm[g8]
+seteof show.plm
+isx
+plm80 show.plm nolist debug
+era show.plm
+link show.obj,x0100,plm80.lib to show1.mod
+locate show1.mod code(0100H) stacksize(100)
+era show1.mod
+objhex show1 to show1.hex
+link show.obj,x0200,plm80.lib to show2.mod
+locate show2.mod code(0200H) stacksize(100)
+era show2.mod
+objhex show2 to show2.hex
+era show2
+cpm
+objcpm show1
+era show1.com
+pip show.hex=show1.hex,show2.hex
+era show1.hex
+era show2.hex
+zero
+genmod show.hex xshow.prl 
+era *.hex
+

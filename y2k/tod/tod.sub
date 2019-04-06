@@ -1,0 +1,24 @@
+pip a:=tod.plm[g8]
+seteof tod.plm
+isx
+plm80 tod.plm nolist debug
+era tod.plm
+link tod.obj,x0100,plm80.lib to tod1.mod
+locate tod1.mod code(0100H) stacksize(100)
+era tod1.mod
+objhex tod1 to tod1.hex
+link tod.obj,x0200,plm80.lib to tod2.mod
+locate tod2.mod code(0200H) stacksize(100)
+era tod2.mod
+objhex tod2 to tod2.hex
+era tod2
+cpm
+objcpm tod1
+era tod1.com
+pip tod.hex=tod1.hex,tod2.hex
+era tod1.hex
+era tod2.hex
+zero
+genmod tod.hex xtod.prl 
+era *.hex
+

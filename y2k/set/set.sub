@@ -1,0 +1,24 @@
+pip a:=set.plm[g8]
+seteof set.plm
+isx
+plm80 set.plm nolist debug
+era set.plm
+link set.obj,x0100,plm80.lib to set1.mod
+locate set1.mod code(0100H) stacksize(100)
+era set1.mod
+objhex set1 to set1.hex
+link set.obj,x0200,plm80.lib to set2.mod
+locate set2.mod code(0200H) stacksize(100)
+era set2.mod
+objhex set2 to set2.hex
+era set2
+cpm
+objcpm set1
+era set1.com
+pip set.hex=set1.hex,set2.hex
+era set1.hex
+era set2.hex
+zero
+genmod set.hex xset.prl 
+era *.hex
+

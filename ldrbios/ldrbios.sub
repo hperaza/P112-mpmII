@@ -1,0 +1,3 @@
+m80 =ldrbios.180
+link ldrbios.bin=ldrbios[nr,l1700]
+

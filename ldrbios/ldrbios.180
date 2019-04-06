@@ -1,0 +1,902 @@
+	TITLE	BIOS1
+	SUBTTL	19-Apr-1999  DRB,HFB,HP
+;=======================================================================;
+;	P 1 1 2   M P / M - 1 . 1   L o a d e r   B I O S		;
+;									;
+;  Adapted from the "First cut" BIOS for the Z80182 CP/M board, further	;
+;  enhanced by H. Bower. Supports booting from a 3" or 5" drive.	;
+;									;
+;  19 Apr 1999, Hector Peraza.						;
+;=======================================================================;
+;   D-X Designs Pty. Ltd.   Perth, Western Australia			;
+;   Project: 112			May, 1996			;
+;									;
+;  Copyright (C) 1996  David R. Brooks					;
+;									;
+;  This program is free software; you can redistribute it and/or	;
+;  modify it under the terms of the GNU General Public License		;
+;  as published by the Free Software Foundation; either version 2	;
+;  of the License, or (at your option) any later version.		;
+;									;
+;  This program is distributed in the hope that it will be useful,	;
+;  but WITHOUT ANY WARRANTY; without even the implied warranty of	;
+;  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the	;
+;  GNU General Public License for more details.				;
+;									;
+;  You should have received a copy of the GNU General Public License	;
+;  along with this program; if not, write to the Free Software		;
+;  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		;
+;									;
+;=======================================================================;
+
+	INCLUDE	Z180.INC
+	INCLUDE	BIOSEQU.INC	; Get processor, chip and general equates
+
+; Addresses within the CP/M load
+
+CPMSZE	EQU	1600H		; Length of CCP + BDOS
+
+CCP	EQU	BIOS-CPMSZE	; Start of CP/M proper
+BDOS	EQU	CCP+806H	; Entry point within CP/M
+
+; Addresses within the 1st. 100H bytes
+
+BOOT?	EQU	0000H		; "jp boot"
+IOBYTE	EQU	0003H		; Intel I/O Byte
+CDISK	EQU	0004H		; Currently Logged Disk
+BDOS?	EQU	0005H		; "JP BDOS"
+
+LDRE	EQU	0100H
+
+	CSEG
+
+; BIOS standard entry points
+
+BIOS:	JP	LDRE		; Cold Boot (First locn.)
+WBOOTE:	JP	LDRE
+	JP	Const
+	JP	Conin
+	JP	Conout
+	JP	Dummy
+	JP	Dummy
+	JP	Dummy
+	JP	Home		; See side effect below
+	JP	SelDsk
+	JP	SetTrk
+	JP	SetSec
+	JP	SetDMA
+	JP	Read
+	JP	Write
+	JP	Dummy
+	JP	SecTran
+	PAGE
+;	D I S K   O R G A N I S A T I O N   T A B L E S
+
+;   The 3" diskette has 18 sectors per track, while the 5" has 9. Both
+; drives are 2-sided. This makes for a very simple dual-drive scheme:
+; for 5" drives, the two sides are mapped into one 18-sector track, 
+; while each side is a separate track on the 3" drives.
+;   The overall organisation is then:
+
+;			    3"		5"	    3"BP	3/5"DSQD
+;   --------------------------------------------------------------------
+;   Bytes / sector	   512	       512	    1024	 1024
+;   Sectors / track	    18		18	      11	    5
+;   Tracks / disk	   160		40	     160	  160
+;   --------------------------------------------------------------------
+;   Bytes / disk	1,474,560    368,640
+
+;  The only parameter which changes is the number of "tracks".
+
+;  Both drives have the sector interlace created by hard formatting.
+; Hence there is no sector-translation table. This system is not only 
+; simpler, but is inherently transparent to disks created with different
+; interlace strategies.
+
+; Constants describing the track layout:-
+
+BLKSIZ	EQU	2048		; CP/M Allocation Block size (default all)
+
+; BDOS write-command codes:
+
+WRALL	EQU	0		; Write to Allocated
+WRDIR	EQU	1		; Write to Directory
+WRUAL	EQU	2		; Write to Unallocated
+
+;----------------------------------------------------------------------
+;	D I S K - P A R A M E T E R   H E A D E R S
+ 
+; Drive Parameter headers: Drive 0 only
+ 
+			; Drive 0:	Values for a 3", 1.44MB drive
+dpBase:	DW	0		; Skew table (none)
+	DW	0,0,0		; Scratch for CP/M
+	DW	dirBf		; Directory Buffer
+dpbPtr:	DW	dpBlk3		; Disk Parameter Block (3")
+	DW	chk00		; Work area (for changed diskettes)
+	DW	all00		; Allocation vector
+
+HDRSIZ	 EQU  $-dpBase		; Length of block
+
+NDRIVES	 EQU  ($-dpBase) / HDRSIZ	; No. of drives
+
+;----------------------------------------------------------------------
+;	D I S K - P A R A M E T E R   B L O C K S
+; The following "max." values are defined for the largest disk
+
+NODE	EQU	256	; No. of directory entries (1024 for SCSI)
+NOAB	EQU	874	; No. of allocation blocks (2500 for 4k blks,10MB SCSI)
+
+;------------------------------------------------
+; Parameters for 5", 360kB drives
+
+			; Special parameters BEFORE label
+	DB	D5_360		; Drive type
+	DW	ReMap5		; Sector mapping strategy
+dpBlk5:	DW	4*18		; CP/M "sectors"/track
+	DB	4		; Block shift
+	DB	15		; Block mask
+	DB	1		; Extent mask
+	DW	174		; Max. allocn. block no.
+	DW	63		; No. of directory entries -1
+	DB	10000000B	; Bit-map for allocn. blocks
+	DB	00000000B	;   used for directory
+	DW	16		; No. of bytes in dir. check buffer
+	DW	1		; No. of tracks before directory
+ 
+DPBOFS	 EQU  $-dpBlk5		; Size of the preceding block
+
+; Custom extension: controller hardware parameters.  Format is same as MS-DOS
+; NOTE: Also used in select to Read 250 kbps MFM Sector IDs.
+
+phChrL:	DB	0DFH	; SRT=3mS, HUT=240mS
+	DB	02H	; HLT=4mS, no DMA
+	DB	25H	; 5 secs. (25 index pulses)
+	DB	02H	; 512 bytes/sector
+maxSec:	DB	9	; Sectors/track
+	DB	2AH	; Gap length
+	DB	0FFH	; DTL (not used)
+	DB	80	; Gap-3 length: Format
+	DB	0E5H	; Data fill: Format
+	DB	15	; Head-settle time (mS)
+	DB	8	; Motor-on delay * 1/8 sec.
+	DB	39	; Highest cylinder no.
+	DB	02	; Data Rate (250 kb/s)
+	DB	1	;; First Physical Sector Number
+
+;------------------------------------------------
+; Parameters for 3", 1.4MB drives
+
+			; Special parameters BEFORE label
+	DB	D3_144		; Drive type
+	DW	ReMapS		; Sector mapping strategy
+dpBlk3:	DW	4*18		; CP/M "sectors"/track
+	DB	4		; Block shift
+	DB	15		; Block mask
+	DB	0		; Extent mask
+	DW	715-1		; Max. allocn. block no.
+	DW	128-1		; No. of directory entries -1
+	DB	11000000B	; Bit-map for allocn. blocks
+	DB	00000000B	;   used for directory
+	DW	32		; No. of bytes in dir. check buffer
+	DW	1		; No. of tracks before directory
+
+; Custom extension: controller hardware parameters.  Format is same as MS-DOS
+; NOTE: Also used in select to Read 500 kbps "High-Density" Sector IDs.
+
+phChrH:	DB	0DFH	; SRT=3mS, HUT=240mS
+	DB	02H	; HLT=4mS
+	DB	25H	; 5 secs. (25 index pulses)
+	DB	02H	; 512 bytes/sector
+	DB	18	; Sectors/track
+	DB	1BH	; Gap length
+	DB	0FFH	; DTL (not used)
+	DB	108	; Gap-3 length: Format
+	DB	0E5H	; Data fill: Format
+	DB	15	; Head-settle time (mS)
+	DB	8	; Motor-on delay * 1/8 sec.
+	DB	79	; Highest cylinder no.
+	DB	00	; Data Rate (500kb/s)
+	DB	1	;; First Physical Sector Number
+
+;------------------------------------------------
+; Parameters for 3", 1.76MB Drives (BP HD Format)
+
+			; Special parameters BEFORE label
+	DB	BP_176		; Drive type
+	DW	ReMapS		; Sector mapping strategy
+dpBlk2:	DW	88		; CP/M "sectors"/track
+	DB	4		; Block shift
+	DB	15		; Block mask
+	DB	0		; Extent mask
+	DW	873		; Max. allocn. block no.
+	DW	255		; No. of directory entries -1
+	DB	11110000B	; Bit-map for allocn. blocks
+	DB	00000000B	;   used for directory
+	DW	64		; No. of bytes in dir. check buffer
+	DW	1		; No. of tracks before directory
+
+; Custom extension: controller hardware parameters.
+
+	DB	0DFH	; SRT=3mS, HUT=240mS
+	DB	02H	; HLT=4mS
+	DB	25H	; 5 secs. (25 index pulses)
+	DB	03H	; 1024 Bytes/Sector
+	DB	11	; Sectors/track
+	DB	11H	; Gap length
+	DB	0FFH	; DTL (not used)
+	DB	34	; Gap-3 length: Format
+	DB	0E5H	; Data fill: Format
+	DB	15	; Head-settle time (mS)
+	DB	8	; Motor-on delay * 1/8 sec.
+	DB	79	; Highest cylinder no.
+	DB	00H	; Data Rate (500kb/s)
+	DB	65	;; 1st Physical Sector Number
+
+;------------------------------------------------
+; Parameters for 3"/5", 800KB Drives (Ampro/ON/YASBEC/SB180 DSQD Format)
+
+			; Special parameters BEFORE label
+	DB	Am_800		; Drive type
+	DW	ReMapS		; Sector mapping strategy
+dpBlk1:	DW	40		; Sectors per track
+	DB	4		; Block shift factor
+	DB	15		; Block mask
+	DB	0		; Extent mask
+	DW	394		; Disk size-1
+	DW	255		; Directory max
+	DB	0F0H, 0		; Alloc 0, 1
+	DW	64		; Check size
+	DW	2		; Track offset
+
+; Custom extension: controller hardware parameters.
+
+	DB	0DFH	; SRT=3mS, HUT=240mS
+	DB	02H	; HLT=4mS
+	DB	25H	; 5 secs. (25 index pulses)
+	DB	03H	; 1024 Bytes/Sector
+	DB	5	; Sectors/track
+	DB	1BH	; Gap length
+	DB	0FFH	; DTL (not used)
+	DB	54H	; Gap-3 length: Format
+	DB	0E5H	; Data fill: Format
+	DB	15	; Head-settle time (mS)
+	DB	8	; Motor-on delay * 1/8 sec.
+	DB	79	; Highest cylinder no.
+	DB	02H	; Data Rate (500kb/s)
+	DB	17	;; 1st Physical Sector Number
+
+;---------------------------------------------------------------------
+BSECTS	EQU	(BDos-CCP)/128	; No. of warm-boot sectors to load
+
+Dummy:	xor	a
+	ret
+
+;------------------------------------------------------------
+; Output ASCIIZ on conout
+
+PutMsg:	LD	A,(HL)		; Affects A, BC, HL
+	AND	A
+	RET	Z		; Zero terminates
+	LD	C,A
+	CALL	ConOut		; Display 1 char.
+	INC	HL
+	JR	PutMsg
+
+;------------------------------------------------------------
+;	C O N S O L E   I / O   O P E R A T I O N S 
+
+ConSt:	IN0	A,(SCCACNT)	; Console status
+	RRA			; Input-ready is Bit-0 ( -> CY)
+	SBC	A,A		; A = FF, if CY = 1
+	RET
+
+ConIn:	PUSH	HL		; console input
+	PUSH	BC		; delays for drive turn-off
+	LD	HL,0
+	LD	B,12		; initialise: 6 secs. approx
+Lp:	CALL	ConSt
+	AND	A		; console ready?
+	JR	NZ,Ex		; yes...
+	DEC	HL
+	LD	A,H
+	OR	L		; inner-loop count
+	JR	NZ,Lp
+	DJNZ	Lp		; outer-loop count
+
+	CALL	TurnOff		; After 6 secs., drives off
+
+W2:	CALL	ConSt		; then wait on...
+	JR	Z,W2
+Ex:	POP	BC		; input ready
+	POP	HL
+	IN0	A,(SCCAD)
+	AND	7FH		; so get it
+	RET
+
+ConOut:	IN0	A,(SCCACNT)	; console output
+	BIT	2,A		; tx ready?
+	JR	Z,ConOut
+	LD	A,C
+	OUT	(SCCAD),A	; send it
+	RET
+
+;-------------------------------------------------------------
+;	D I S K - M A N A G E M E N T   F U N C T I O N S
+
+Home:	CALL	Flush		; Intentional side effect
+	LD	BC,0		; Use track 0
+SetTrk:	LD	(sekTrk),BC	;  Use track (BC) - full 16 bits
+	RET
+
+;-----------------------------------------------------------------
+; Clean-up the disk sub-system
+ 
+Flush:	LD	A,(hstAct)	; See if block needs writing out, first
+	OR	A
+	RET	Z
+	LD	A,(hstWrt)	; If active & written, write it back
+	OR	A
+	CALL	NZ,WriteHst	; Return Z if OK
+	RET
+
+;------------------------------------------------------------------
+; Save Sector Number Passed in Reg C.
+
+SetSec:	LD	A,C		; Use sector (C)
+	LD	(sekSec),A
+	RET
+
+; Translate Sector (BC), using table at (DE)
+
+SecTran: PUSH	BC
+	POP	HL		; Null routine: just BC => HL
+	RET
+
+SetDMA:	LD	(dmaAdr),BC	; Buffer addr. in BC
+	RET
+
+SelDsk:	CALL	Init
+	LD	HL,0		; Select drive (C): DPH ptr. in HL
+	LD	A,C
+	LD	(sekDsk),A
+	OR	A		; Valid?
+	RET	NZ		; If > 0, abort
+
+	BIT	0,E		; Fresh Mount?
+	JP	NZ,SelEnd	; ..jump if So, No New Log needed
+	PUSH	BC
+	CALL	Home		; Else, Send the Drive to Track 0
+	POP	BC
+
+	PUSH	IX		; Let's keep this routine benign
+	LD	A,(NVRate)
+	RLA			; NV Ram Valid?
+	JR	C,SelOld	; ..jump if So to blindly try both formats
+
+; At this point, the Drive to select is in C, and NV Ram IS Valid
+;  Use the configured physical drive characteristics to narrow the search
+; NOTE: this simplified method assumes ONLY Drives A: and B:
+
+	LD	A,(flpy00)	; Assume Floppy 0
+	BIT	0,C		; 0 if Drive A:, 1 if B:
+	JR	Z,Sel00		; ..jump if A:
+	LD	A,(flpy10)	; Else get physical Drive B: settings
+Sel00:	BIT	7,A		; "High-Density" Capable?
+	JR	Z,Sel01		; ..jump to just trying 250 kb/s MFM if Not
+SelOld:	LD	IX,phChrH	; Set to High-Density basic settings
+	LD	D,C		;   position Drive #
+	CALL	ReadID		; Try to Read Sector ID Mark
+	JR	NC,SelOk	; ..jump if Successfully ID'd at HD
+
+	CALL	Reset		; Else, reset the Controller to Try Normally
+Sel01:	LD	IX,phChrL	; Set Normal-Density basic settings
+	LD	D,C		;   position Drive #
+	CALL	ReadID		; Can we Read now?
+	JR	C,SelBad	; ..Err out if Not
+
+; If we make it here, we have the Sector Size code in A, and IX points to the
+; characteristics that allowed us to Read.  Only the four formats ID'd in the
+; beginning of the code are currently recognized.  Decipher and Set.
+
+SelOk:	CP	02H		; 512-byte Sectors?
+	JR	Z,SelOk0	; ..jump if So to set small blocks
+	CP	03H		; 1024-byte Sectors?
+	JR	NZ,SelBad	; ..Quit w/Error if So, can't ID
+	LD	DE,dpBlk2	; (assume BP 1.76 MB format)
+	BIT	1,(IX+DRATE)	; "High-Density"?
+	JR	Z,SelOk1	; ..jump if So
+	LD	DE,dpBlk1	; Else set for Ampro 800 kB size
+	JR	SelOk1		; ..and continue
+
+SelOk0:	LD	DE,dpBlk3	; (assume 1.44 MB format)
+	BIT	1,(IX+DRATE)	; "High-Density"?
+	JR	Z,SelOk1	; ..jump if So
+	LD	DE,dpBlk5	; Else set for 360 kB size
+	JR	SelOk1		; ..and Continue
+
+SelBad:	POP	IX		; Restore IX
+	LD	HL,0		;  Set Bad Exit Conditions (No DPH)
+	RET			; ..and Quit
+
+; The format has been deciphered.  Store the ID'd Disk Parameter Block (DPB)
+; pointer in the CP/M Disk Parameter Header (DPH) Table for this drive.
+
+SelOk1:	POP	IX		; Restore Entry value, don't need IX any more
+	LD	A,(sekDsk)	; Get Drive
+	LD	C,A
+	LD	B,HDRSIZ	; Length of DPH entry
+	MLT	BC		; BC = offset into list
+	LD	HL,dpBase
+	ADD	HL,BC		; DPH ptr. in HL (wanted for BDOS)
+
+	LD	BC,dpbPtr-dpBase
+	ADD	HL,BC
+	LD	(HL),E		; Store our identified Format
+	INC	HL
+	LD	(HL),D
+
+SelEnd:	LD	A,(sekDsk)	; Get the Drive we want again
+	LD	C,A
+	LD	B,HDRSIZ	; Length of DPH entry
+	MLT	BC		; BC = offset into list
+	LD	HL,dpBase
+	ADD	HL,BC		; DPH ptr. in HL (wanted for BDOS)
+	PUSH	HL		;  (save for Exit)
+	LD	BC,dpbPtr-dpBase
+	ADD	HL,BC
+	LD	A,(HL)		; Fetch the DPB Addr
+	INC	HL
+	LD	H,(HL)
+	LD	L,A
+	LD	A,(HL)		; Get CP/M Sctrs-per-Track
+	LD	(cpmSPT),A	;  Save for deblocker
+
+	PUSH	HL		; save DPB
+
+	DEC	HL
+	LD	B,(HL)
+	DEC	HL
+	LD	C,(HL)		; BC -> mapping strategy
+	LD	(mapPtr),BC	;  Saved for disk access routines
+
+	LD	BC,dpbOfs+2
+	ADD	HL,BC
+	LD	(curDph),HL	; HL -> current hardware parameters
+
+	POP	DE	; DPB
+
+	LD	HL,dpbofs+3
+	ADD	HL,DE		; Pt to Physical Sector Size byte
+	LD	A,(HL)		;  fetch
+	LD	(secShf),A	;   save for deblocker
+	LD	B,A
+	XOR	A
+SelE0:	SCF			; Set "1" Bit
+	ADC	A,A		;  shift in Accum
+	DJNZ	SelE0		; ..til Done
+	LD	(secMsk),A	;    save for deblocker
+
+	POP	HL		; Original DPH ptr. for BDOS
+	RET
+
+;-----------------------------------------------------------------
+; Read one, 128-byte "sector"
+
+Read:	LD	A,1
+	LD	(readOp),A	; Read Operation
+	LD	A,WRUAL
+	LD	(wrType),A	; Treat as Unalloc.
+	JR	Alloc		; to Common Code
+
+; Write one, 128-byte "sector".
+; Note - Not supported in Loader BIOS.
+
+Write:	LD	A,1
+	RET
+
+; Not an Unallocated Record: Requires a Pre-Read
+
+Alloc:	XOR	A
+	LD	(unaCnt),A	; unacnt := 0
+	INC	A
+Alloc1:	LD	(rsFlag),A	; rsflag := 1
+
+; common code for read & write
+
+RWOper:	XOR	A
+	LD	(erFlag),A	;no errors (yet!)
+	LD	A,(sekSec)	;compute host sector
+	LD	C,A
+	LD	A,(secShf)	; Get Sector Shift Factor
+	LD	B,A
+	INC	B		;  bump
+	LD	A,C
+	JR	PhyLp1		;   enter loop
+
+PhyLop:	SRL	A		; Shift Sector (DIV)
+PhyLp1:	DJNZ	PhyLop		; ..loop by shift factor
+	LD	(sekHst),A	; Host Sector to Seek
+
+; Active Host Sector?
+
+	LD	HL,hstAct	; Host-active Flag
+	LD	A,(HL)
+	LD	(HL),1		; Active Now!
+	OR	A		; Was it Already?
+	JR	Z,FilHst	;  fill Host if Not
+
+; Host Buffer Active: Same as Seek Buffer?
+
+	LD	DE,sekDsk	; sekdsk, sektrk
+	LD	HL,hstDsk	; hstdsk, hsttrk
+	LD	B,3
+Lp1:	LD	A,(DE)
+	CP	(HL)		; Equal?
+	JR	NZ,WngSec
+	INC	HL
+	INC	DE
+	DJNZ	Lp1		; ..check all bytes
+	LD	A,(sekHst)	; Use Converted Sector No.
+	CP	(HL)		; Same Sector Too?
+	JR	Z,Match
+
+; proper disk, but not correct sector
+
+WngSec:	LD	A,(hstWrt)	; Host Written?
+	OR	A
+	CALL	NZ,WriteHst	; Clear Host Buffer
+
+; may have to fill the host buffer
+
+FilHst:	LD	HL,sekDsk	; sekdsk & sektrk =>
+	LD	DE,hstDsk	;  hstdsk & hsttrk
+	LD	BC,3
+	LDIR
+	LD	A,(sekHst)
+	LD	(DE),A		; sekhst => hstsec
+	LD	A,(rsFlag)	; Need to Read?
+	OR	A
+	CALL	NZ,ReadHst	; Yes, if 1
+	XOR	A
+	LD	(hstWrt),A	; No Pending Write
+
+; Copy Data To/From Buffer
+
+Match:	LD	A,(secMsk)	; Get l.s. Bits from Mask
+	LD	B,A
+	LD	A,(sekSec)	; mask buffer no.
+	AND	B		; l.s. bits
+	LD	L,0		; Bits SHL 7 => HL
+	SRL	A
+	LD	H,A
+	RR	L		; Shift Right 1, ie Left 7 in Next Byte
+	LD	DE,hstBuf
+	ADD	HL,DE		; HL := Host Addr.
+	LD	DE,(dmaAdr)	; Get/Put to CP/M Buffer
+	LD	BC,128
+	LD	A,(readOp)	; Which Way?
+	OR	A
+	JR	NZ,RWMove	; Skip if Read
+
+; Write Operation: Mark & Switch Direction
+
+	LD	A,1
+	LD	(hstWrt),A	; hstwrt := 1
+	EX	DE,HL		; Source/Dest. Swap
+RWMove:	LDIR			; Shift Across
+
+; Data has been Moved To/From Host Buffer
+
+	LD	A,(wrType)
+	CP	WRDIR		; Write to Directory?
+	LD	A,(erFlag)	; in case Errors
+	RET	NZ		; No Further Processing
+
+; clear host buffer for directory write
+
+	OR	A		; Errors?
+	RET	NZ		; Skip if So
+	XOR	A
+	LD	(hstWrt),A	; Buffer Written
+	CALL	WriteHst
+	LD	A,(erFlag)
+	RET
+ 
+;---------------------------------------------------------
+;	B A S I C   D I S K   O P E R A T I O N S
+ 
+; Turn off all Drive Motors
+
+TurnOff: LD	A,1
+	CALL	DiskOp
+	RET
+
+; Set up Argts. for READ
+
+ReadHst: LD	A,2		; READ Command
+	 JR	Common
+ 
+; Set up Argts. for WRITE
+
+WriteHst: LD	A,3		; WRITE Command
+ 
+Common:	PUSH	IX		; Must not alter it, for DOS+
+	PUSH	AF		; Save the command
+	CALL	MapSec		; Get track & sector in C, E
+	LD	IX,(curDph)	; Current drive parameters
+	LD	HL,hstBuf	; Always IO to this buffer
+	LD	A,(hstDsk)	; Drive no.
+	LD	D,A
+	LD	B,1		; Always 1 sector only
+	POP	AF		; Command code
+	CALL	DiskOp		; Go do it
+	POP	IX		; Unchanged
+	JR	C,Flt
+	XOR	A		; OK - set zero
+	RET
+
+Flt:	LD	A,1		; Errors: set NZ
+	AND	A
+	LD	(erFlag),A
+	RET
+
+;----------------------------------------------------------
+;	S E T   U P   D R I V E   P A R A M E T E R S
+ 
+;  Routine to assign hardware type & CP/M strategies to a given
+; drive. Enter with:
+;	D = Drive No. (0..ndrives)
+;	E = Drive Type (0..ntypes)
+;
+; If E = -1, the currently assigned type is RETURNED in E, and
+;  IX will point to the hardware parameter block. The BIOS tables
+; are unchanged by this call.
+ 
+DriveType:
+	LD	A,D
+	CP	NDRIVES		; Drive in range?
+	CCF
+	RET	C		; No: exit with CY=1
+ 
+	LD	B,D
+	LD	C,HDRSIZ
+	MLT	BC
+	LD	HL,dpBase
+	ADD	HL,BC		; HL -> reqd. DPH
+ 
+	LD	BC,dpbPtr-dpBase
+	ADD	HL,BC		; HL -> DPBPTR
+ 
+	LD	A,E		; Given drive type
+	CP	-1		; Requested?
+	JR	NZ,dt1		; This leaves CY=0
+ 
+	LD	A,(HL)		; Yes
+	INC	HL
+	LD	H,(HL)
+	LD	L,A		; HL -> Drive Parameter Block
+	PUSH	HL
+	POP	IX		; IX ditto
+	LD	E,(IX-3)	; Drive type
+	LD	BC,DPBOFS
+	ADD	IX,BC		; Ptr. to hardware params. in IX
+	RET			; Return them
+ 
+dt1:	CP	NTYPES		; Set type: is it valid?
+	CCF
+	RET	C		; Out of range
+	PUSH	HL
+	POP	IX		; IX -> DPBPTR
+	SLA	E
+	LD	D,0
+	LD	HL,typTab
+	ADD	HL,DE		; HL -> type ptr.
+ 
+	LD	A,(HL)
+	INC	HL
+	LD	H,(HL)
+	LD	L,A		; HL -> reqd. parameters
+	OR	H		; Null pointer?
+	SCF
+	RET	Z		; If so, error
+ 
+	LD	(IX),L
+	LD	(IX+1),H	; OK: set up the DPH pointer
+	AND	A
+	RET
+
+; List of ptrs. to valid drive types
+
+typTab:	DW	dpBlk5		; D5_360
+	DW	dpBlk1		; Am_800
+	DW	dpBlk2		; BP_176
+	DW	dpBlk3		; D3_144
+	DW	0		; D3_288
+ 
+;----------------------------------------------------------
+;	 S E C T O R - M A P P I N G   F U N C T I O N S
+ 
+; The 3" drive treats each side as one track, while the 5" drive
+; treats the entire "cylinder" as one track. This routine maps
+; track & sector for these.
+
+;   For the new formats, Tracks are independant, with the Track LSB
+; selecting the Head (0 for Even Tracks, 1 for Odd Tracks).  The Sector
+; Number passed from the DOS (0..maxsec) is offset by a constant factor
+; which has been added to the descriptor table as SCTR_1.
+
+; Get logical address from (hsttrk, hstsec)
+; Return physical track in C, sector in E
+
+; Generic entry: requires IX -> DPB
+
+MapSec:	LD	HL,(mapptr)	; Point to slave routine
+	JP	(HL)		; ..Go there
+ 
+; Mapping for 5" disk
+
+ReMap5:	CALL	ReMapS		; Load Trk & Sctr
+	LD	A,E		; Fetch Sector
+	DEC	A		;   compensated for INC in ReMapS
+	SLA	C		; Cylinder => track
+	CP	9		; Over 1 physical track?
+	JR	C,Rm51
+	SUB	9		; Yes: adjust down
+	INC	C		;  & use top side
+Rm51:	INC	A		; Physical sectors based 1
+	LD	E,A		; Sector in E
+	RET			; Returns physical track in C
+ 
+; Mapping for 3" disk now same as:
+; Mapping for BP and Ampro formats (pseudo-standard)
+
+ReMapS:	LD	A,(hstSec)	; Get Host Sector
+	LD	HL,(curdph)
+	LD	BC,SCTR_1
+	ADD	HL,BC		; Pt to 1st Physical Sector #
+	ADD	A,(HL)		;  add to Host Sector
+	LD	E,A		;   store for Exit
+	LD	A,(hstTrk)	; Get Low byte of Host Track
+	LD	C,A		;  position
+	RET			;   back to Caller
+
+;-------------------------------------------------------------------
+
+Init:	LD	A,(iniflg)
+	OR	A
+	RET	NZ
+	INC	A
+	LD	(iniflg),A
+
+	DI			; Disable interrupts (in case MPMLDR
+				;  was called from a running MP/M system)
+
+	LD	A,80H		; Get rid of ROM, Bank 0000-7FFF
+	OUT0	(CBAR),A	;  Common 1 RAM from 8000-FFFF
+
+	XOR	A		; Cold Start
+	LD	(cDisk),A	; Start from the boot disk (Drive A:, User 0)
+	LD	(bootDv),A	; Save boot-drive number (Always A:)
+
+Iz0:	LD	HL,Welcome
+	CALL	PutMsg		; Print welcome banner
+
+	LD	D,0
+	LD	E,-1		; Read Drive Type
+	CALL	DriveType	; Set up drive & type
+
+	XOR	A
+	CALL	DiskOp		; Reset the (newly loaded) disk driver
+
+	LD	HL,AuxInz
+	CALL	Setup		; Port setups: aux. port
+
+	XOR	A
+	LD	(hstAct),A	; Host Buffer inactive
+	LD	(unaCnt),A	; unalloc. ctr. = 0
+	RET
+
+Welcome: DB	CR,LF,'D-X Designs P112 Loader Bios (V2.1)',CR,LF,0
+
+;----------------------------------
+; Output a block to ports
+
+Setup:	LD	A,0FFH
+Ilp:	LD	B,0		; MS address bits
+	LD	C,(HL)		; Output port
+	TST	C		; Zero will halt (A & C)
+	RET	Z
+	INC	HL		; Else, point to data
+	OUTI			;  Sent, alters B
+	JR	Ilp
+
+; Setup table for aux. port
+
+AuxInz:	DB	_LCR,	80H	; Select divisor
+	DB	_DDL,	0CH	; 9600 bps
+	DB	_DLM,	0	; Divisor MSB
+	DB	_LCR,	03H	; 8 bits, 1 stop, no parity
+	DB	_IER,	0	; No interrupts
+	DB	_MCR,	03H	; DTR, RTS active
+	DB	0		;  End
+
+	SUBTTL	Bios Floppy Diskette Driver
+	PAGE
+	INCLUDE	BIOSDISK.INC	; Add Disk Routine Code
+
+	SUBTTL	Cold Boot Init and Data
+	PAGE
+
+; The Following Items are NOT overlayed by Boot Code
+
+iniflg:	db	0
+
+bootDv:	DS	1		; Boot-drive number
+NVRate:	DB	0FFH		; MSB=1 if NV RAM Not Valid, 0 if Parms Valid
+				;   If valid, Bits0-3 are Console Data Rate
+nvRam0:	DS	1		; CPU speed and wait settings (not used)
+flpy00:	DB	0CFH		; NV RAM Floppy 0 Physical Parms
+flpy0T:	DB	13H		;  Floppy 0 Timings
+flpy10:	DB	0CFH		; NV RAM Floppy 1 Physical Parms
+flpy1T:	DB	13H		;  Floppy 1 Timings
+
+localData:	; BIOS workspace
+
+;dirBf:	DS	128		; Directory Buffer
+all00:	DS	(noab/8)+1	; Allocation Vector, enough for 3" drives
+chk00:	DS	(node)/4	; Directory Check areas, enough for 3" drives
+
+curDph:	DS	2		; Ptr. to selected DPH
+mapPtr:	DS	2		; Ptr. to current mappin strategy
+dmaAdr:	DS	2		; user "dma" addr.
+readOp:	DS	1		; 1 if read operation
+wrType:	DS	1		; write operation type
+erFlag:	DS	1		; error reporting / retry counter
+rsFlag:	DS	1		; read sector flag
+unaCnt:	DS	1		; unalloc. record count
+
+; Variables for Currently Logged/Active Drive
+
+cpmSPT:	DS	1		; Number of CP/M Logical 128-byte Sctrs/Trk
+secShf:	DS	1		; Sector Shift Factor
+secMsk:	DS	1		; Sector Mask
+
+sekHst:	DS	1		; seek shr secshf
+hstAct:	DS	1		; host active flag
+hstWrt:	DS	1		; host written flag
+
+; following "triads" are order-sensitive
+
+sekDsk:	DS	1		; seek disk no.
+sekTrk:	DS	2		; seek track no.
+sekSec:	DS	1		; seek sector no.
+
+hstDsk:	DS	1		; host disk no.
+hstTrk:	DS	2		; host track no.
+hstSec:	DS	1		; host sector no.
+
+unaDsk:	DS	1		; last unalloc. disk
+unaTrk:	DS	2		; last unalloc. track
+unaSec:	DS	1		; last unalloc. sector
+
+; Data For Low-level Disk Driver Code
+
+calibd:	DS	1		; Drives "Calibrated" flags
+mask:	DS	1		; Bit-mask of current drive
+resTab:	DS	7		; Buffer for result-phase data
+rtCnt:	DS	1		; IO command retry count (after RESTAB)
+switch:	DS	3		; Builds a JP instruction
+
+blkSze:	DS	2		; Save block size
+
+; The Buffer used for Physical Sector Reads goes last, re-using the
+; initial setup code.  It may be as large as 1024 bytes for larger formats.
+
+;hstBuf:				; Disk sector buffer
+
+dirBf	EQU	8000h		; Directory buffer (*)
+hstBuf	EQU	dirBf+80h	; Disk sector buffer (*)
+
+	END
+
